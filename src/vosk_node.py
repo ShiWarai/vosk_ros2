@@ -2,26 +2,26 @@
 """
 ROS2 узел для распознавания речи на основе Vosk.
 
-Узел непрерывно слушает аудио вход и публикует результаты распознавания.
-Основан на voice_control.py, но адаптирован для ROS2.
+Узел подписывается на топик аудио и публикует результаты распознавания.
 """
 
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionServer
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from ament_index_python.packages import get_package_share_directory
 
-import sounddevice as sd
 import queue
 import vosk
 import json
 import time
 import threading
 import os
+import numpy as np
 
 from vosk_ros2.msg import Transcription
 from vosk_ros2.action import STT
+from audio_common_msgs.msg import AudioStamped
 
 
 class VoskNode(Node):
@@ -39,27 +39,24 @@ class VoskNode(Node):
 
         # Объявляем параметры
         self.declare_parameter('model_path', default_model_path)
-        self.declare_parameter('sample_rate', 48000)
-        self.declare_parameter('device_index', '2,0')
-        self.declare_parameter('device_name', '')
-        self.declare_parameter('channels', 1)
+        self.declare_parameter('audio_topic', '/audio/input')
         self.declare_parameter('transcription_topic', '/audio/transcription')
+        self.declare_parameter('max_audio_time', 30.0)  # Максимальное время накопления аудио в секундах
 
         # Получаем параметры
         model_path = self.get_parameter('model_path').get_parameter_value().string_value
-        self.sample_rate = self.get_parameter('sample_rate').get_parameter_value().integer_value
-        device_index_param = self.get_parameter('device_index').get_parameter_value().string_value
-        device_name = self.get_parameter('device_name').get_parameter_value().string_value
-        self.channels = self.get_parameter('channels').get_parameter_value().integer_value
+        audio_topic = self.get_parameter('audio_topic').get_parameter_value().string_value
         transcription_topic = self.get_parameter('transcription_topic').get_parameter_value().string_value
+        self.max_audio_time = self.get_parameter('max_audio_time').get_parameter_value().double_value
+        
+        # Параметры аудио будут получены из первого сообщения
+        self.sample_rate = None
+        self.channels = None
 
-        # Парсим device_index
-        self.device_index = self._parse_device_index(device_index_param, device_name)
-
-        # Загружаем модель Vosk
+        # Загружаем модель Vosk (частота будет установлена при первом сообщении)
         try:
             self.model = vosk.Model(model_path)
-            self.rec = vosk.KaldiRecognizer(self.model, self.sample_rate)
+            self.rec = None  # Будет создан при первом сообщении
             self.get_logger().info(f'Модель Vosk загружена из: {model_path}')
         except Exception as e:
             self.get_logger().fatal(f'Ошибка загрузки модели Vosk: {e}')
@@ -70,7 +67,6 @@ class VoskNode(Node):
         
         # Отслеживание обработки аудио
         self.bytes_per_sample = 2  # int16 = 2 байта
-        self.last_recognition_time = None
 
         # Публикаторы
         self.transcription_pub = self.create_publisher(
@@ -87,66 +83,85 @@ class VoskNode(Node):
             self.execute_callback
         )
 
-        # Запускаем поток захвата аудио
-        self.running = True
-        self.audio_thread = threading.Thread(target=self._audio_capture_thread, daemon=True)
-        self.audio_thread.start()
+        # Подписываемся на топик аудио
+        sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10
+        )
+        self.audio_subscription = self.create_subscription(
+            AudioStamped,
+            audio_topic,
+            self.audio_callback,
+            sensor_qos
+        )
 
         # Запускаем поток распознавания
+        self.running = True
         self.recognition_thread = threading.Thread(target=self._recognition_thread, daemon=True)
         self.recognition_thread.start()
 
-        self.get_logger().info(f'Узел Vosk запущен (частота: {self.sample_rate} Гц, устройство: {self.device_index}, топик: {transcription_topic})')
+        self.get_logger().info(f'Узел Vosk запущен (топик аудио: {audio_topic}, топик транскрипции: {transcription_topic})')
 
-    def _parse_device_index(self, device_index_param, device_name):
-        """Парсит параметр device_index для получения индекса устройства для sounddevice."""
-        if device_name:
-            # Ищем устройство по имени
-            devices = sd.query_devices()
-            for i, device in enumerate(devices):
-                if device_name.lower() in device['name'].lower():
-                    return i
-            self.get_logger().warn(f'Устройство "{device_name}" не найдено')
+    def _extract_audio_data(self, audio_data_msg):
+        """Извлечь аудио данные из сообщения и конвертировать в int16 байты для Vosk."""
+        # Извлекаем данные в numpy array
+        data = None
+        if hasattr(audio_data_msg, 'float32_data') and len(audio_data_msg.float32_data) > 0:
+            data = np.array(audio_data_msg.float32_data, dtype=np.float32)
+        elif hasattr(audio_data_msg, 'int16_data') and len(audio_data_msg.int16_data) > 0:
+            # Уже int16, можно использовать напрямую
+            return np.array(audio_data_msg.int16_data, dtype=np.int16).tobytes()
+        elif hasattr(audio_data_msg, 'int32_data') and len(audio_data_msg.int32_data) > 0:
+            data = np.array(audio_data_msg.int32_data, dtype=np.int32).astype(np.float32) / 2147483648.0
+        elif hasattr(audio_data_msg, 'int8_data') and len(audio_data_msg.int8_data) > 0:
+            data = np.array(audio_data_msg.int8_data, dtype=np.int8).astype(np.float32) / 128.0
+        elif hasattr(audio_data_msg, 'uint8_data') and len(audio_data_msg.uint8_data) > 0:
+            data = (np.array(audio_data_msg.uint8_data, dtype=np.uint8).astype(np.float32) - 128) / 128.0
         
-        # Пытаемся распарсить device_index как строку "host_index,device_index"
-        if ',' in device_index_param:
-            try:
-                parts = device_index_param.split(',')
-                host_index = int(parts[0])
-                device_index = int(parts[1])
-                # sounddevice использует кортеж для host,device
-                return (host_index, device_index)
-            except ValueError:
-                pass
-        
-        # Пытаемся распарсить как целое число
-        try:
-            return int(device_index_param)
-        except ValueError:
+        if data is None or len(data) == 0:
             return None
+        
+        # Конвертируем float32 [-1, 1] в int16 байты
+        data = np.clip(data, -1.0, 1.0)
+        audio_int16 = (data * 32767).astype(np.int16)
+        return audio_int16.tobytes()
 
-    def _audio_callback(self, indata, frames, time_info, status):
-        """Callback для потока аудио входа."""
-        if status:
-            self.get_logger().warn(f'Статус аудио callback: {status}')
-        self.audio_queue.put(bytes(indata))
-
-    def _audio_capture_thread(self):
-        """Поток для захвата аудио."""
+    def audio_callback(self, msg):
+        """Callback для обработки аудио сообщений из топика."""
         try:
-            with sd.RawInputStream(
-                samplerate=self.sample_rate,
-                dtype='int16',
-                channels=self.channels,
-                callback=self._audio_callback,
-                device=self.device_index
-            ):
-                self.get_logger().info('Захват аудио запущен')
-                while self.running:
-                    time.sleep(0.1)
+            audio_info = msg.audio.info
+            
+            # Инициализируем recognizer при первом сообщении
+            if self.rec is None:
+                self.sample_rate = audio_info.rate
+                self.channels = audio_info.channels
+                self.rec = vosk.KaldiRecognizer(self.model, self.sample_rate)
+                self.get_logger().info(f'Инициализирован recognizer: частота {self.sample_rate} Hz, каналы {self.channels}')
+            
+            # Проверяем, что частота совпадает
+            if audio_info.rate != self.sample_rate:
+                self.get_logger().warn(f'Несовпадение частоты: ожидается {self.sample_rate} Hz, получено {audio_info.rate} Hz')
+                return
+            
+            # Извлекаем и конвертируем аудио данные
+            audio_bytes = self._extract_audio_data(msg.audio.audio_data)
+            if audio_bytes is None:
+                return
+            
+            # Если многоканальное, берем только первый канал
+            if self.channels > 1:
+                # Конвертируем обратно в numpy для обработки каналов
+                audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
+                audio_array = audio_array.reshape(-1, self.channels)[:, 0]  # Берем первый канал
+                audio_bytes = audio_array.tobytes()
+            
+            # Добавляем в очередь для обработки
+            self.audio_queue.put(audio_bytes)
+            
         except Exception as e:
-            self.get_logger().error(f'Ошибка захвата аудио: {e}')
-            self.running = False
+            self.get_logger().error(f'Ошибка обработки аудио сообщения: {e}')
 
     def _recognition_thread(self):
         """Поток для обработки аудио и распознавания речи."""
@@ -161,8 +176,31 @@ class VoskNode(Node):
                 if audio_start_time is None:
                     audio_start_time = time.time()
                 
+                # Проверяем таймаут накопления аудио
+                elapsed_time = time.time() - audio_start_time
+                if elapsed_time > self.max_audio_time:
+                    self.get_logger().warn(
+                        f'Превышен таймаут накопления аудио ({self.max_audio_time} сек). '
+                        f'Сбрасываем счетчик. Накоплено: {audio_bytes_accumulated} байт'
+                    )
+                    audio_start_time = None
+                    audio_bytes_accumulated = 0
+                    continue
+                
                 # Накопляем байты аудио
                 audio_bytes_accumulated += len(data)
+                
+                # Проверяем переполнение (максимум ~2GB для int в Python, но лучше ограничить)
+                if self.sample_rate is not None and self.channels is not None:
+                    max_bytes = int(self.max_audio_time * self.sample_rate * self.channels * self.bytes_per_sample)
+                    if audio_bytes_accumulated > max_bytes:
+                        self.get_logger().warn(
+                            f'Превышен лимит накопленных байт ({max_bytes}). '
+                            f'Сбрасываем счетчик. Текущее значение: {audio_bytes_accumulated} байт'
+                        )
+                        audio_start_time = None
+                        audio_bytes_accumulated = 0
+                        continue
                 
                 # Измеряем время обработки распознавания
                 transcription_start = time.time()
@@ -174,6 +212,8 @@ class VoskNode(Node):
                     if text:
                         # Вычисляем длительность аудио из накопленных байтов
                         audio_duration = audio_bytes_accumulated / (self.sample_rate * self.channels * self.bytes_per_sample)
+                        # Ограничиваем максимальное значение для безопасности
+                        audio_duration = min(audio_duration, self.max_audio_time)
                         self._publish_transcription(text, audio_duration, transcription_time)
                         
                         # Сбрасываем для следующего распознавания
@@ -184,9 +224,22 @@ class VoskNode(Node):
                     partial = json.loads(self.rec.PartialResult())
                     partial_text = partial.get('partial', '')
             except queue.Empty:
+                # Проверяем таймаут при отсутствии новых данных
+                if audio_start_time is not None:
+                    elapsed_time = time.time() - audio_start_time
+                    if elapsed_time > self.max_audio_time:
+                        self.get_logger().warn(
+                            f'Таймаут накопления аудио при отсутствии данных ({self.max_audio_time} сек). '
+                            f'Сбрасываем счетчик.'
+                        )
+                        audio_start_time = None
+                        audio_bytes_accumulated = 0
                 continue
             except Exception as e:
                 self.get_logger().error(f'Ошибка распознавания: {e}')
+                # Сбрасываем при ошибке
+                audio_start_time = None
+                audio_bytes_accumulated = 0
 
     def _publish_transcription(self, text, audio_time=0.0, transcription_time=0.0):
         """Публикует результат распознавания."""
@@ -235,11 +288,10 @@ class VoskNode(Node):
 
     def destroy_node(self):
         """Очистка при уничтожении узла."""
+        self.get_logger().info('Завершение работы узла Vosk...')
         self.running = False
         
-        # Ждем завершения потоков
-        if hasattr(self, 'audio_thread') and self.audio_thread.is_alive():
-            self.audio_thread.join(timeout=2.0)
+        # Ждем завершения потока распознавания
         if hasattr(self, 'recognition_thread') and self.recognition_thread.is_alive():
             self.recognition_thread.join(timeout=2.0)
         

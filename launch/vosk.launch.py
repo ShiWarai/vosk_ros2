@@ -28,52 +28,37 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    """Генерирует описание launch для узла Vosk ROS2."""
+    """Генерирует описание запуска для узла Vosk ROS2."""
 
-    # Получаем путь к модели по умолчанию из share директории пакета
+    # Получаем путь к модели по умолчанию из директории share пакета
     from ament_index_python.packages import get_package_share_directory
     import os
-    try:
-        pkg_share_dir = get_package_share_directory('vosk_ros2')
-        default_model_path = os.path.join(pkg_share_dir, 'models', 'vosk-model-small-ru')
-    except:
-        default_model_path = '/home/orangepi/models/vosk-model-small-ru'
+    pkg_share_dir = get_package_share_directory('vosk_ros2')
+    default_model_path = os.path.join(pkg_share_dir, 'models', 'vosk-model-small-ru')
 
-    # Аргументы launch
+    # Аргументы запуска
     model_path_arg = DeclareLaunchArgument(
         'model_path',
         default_value=default_model_path,
         description='Путь к директории модели Vosk'
     )
 
-    sample_rate_arg = DeclareLaunchArgument(
-        'sample_rate',
-        default_value='48000',
-        description='Частота дискретизации аудио в Гц'
-    )
-
-    device_index_arg = DeclareLaunchArgument(
-        'device_index',
-        default_value='2,0',
-        description='Индекс аудио устройства как строка (может быть "0" для простого индекса или "host_index,device_index" для формата "2,0")'
-    )
-
-    device_name_arg = DeclareLaunchArgument(
-        'device_name',
-        default_value='',
-        description='Имя аудио устройства для поиска (альтернатива device_index)'
-    )
-
-    channels_arg = DeclareLaunchArgument(
-        'channels',
-        default_value='1',
-        description='Количество аудио каналов (1 для моно, 2 для стерео)'
+    audio_topic_arg = DeclareLaunchArgument(
+        'audio_topic',
+        default_value='/audio/input',
+        description='ROS2 топик для подписки на аудио данные'
     )
 
     transcription_topic_arg = DeclareLaunchArgument(
         'transcription_topic',
         default_value='/audio/transcription',
         description='Имя топика для публикации результатов распознавания'
+    )
+
+    max_audio_time_arg = DeclareLaunchArgument(
+        'max_audio_time',
+        default_value='30.0',
+        description='Максимальное время накопления аудио в секундах перед принудительным сбросом (защита от переполнения)'
     )
 
     # Узел
@@ -84,22 +69,17 @@ def generate_launch_description():
         namespace='vosk',
         parameters=[{
             'model_path': LaunchConfiguration('model_path'),
-            'sample_rate': LaunchConfiguration('sample_rate'),
-            'device_index': LaunchConfiguration('device_index'),
-            'device_name': LaunchConfiguration('device_name'),
-            'channels': LaunchConfiguration('channels'),
+            'audio_topic': LaunchConfiguration('audio_topic'),
             'transcription_topic': LaunchConfiguration('transcription_topic'),
+            'max_audio_time': LaunchConfiguration('max_audio_time'),
         }],
         output='screen'
     )
 
     return LaunchDescription([
         model_path_arg,
-        sample_rate_arg,
-        device_index_arg,
-        device_name_arg,
-        channels_arg,
+        audio_topic_arg,
         transcription_topic_arg,
+        max_audio_time_arg,
         vosk_node,
     ])
-
