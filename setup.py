@@ -25,7 +25,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ] + [(os.path.join('share', package_name, os.path.dirname(f)), [f]) for f in get_model_files()],
-    install_requires=['setuptools', 'vosk', 'sounddevice'],
+           install_requires=['setuptools', 'vosk', 'numpy'],
     zip_safe=True,
     maintainer='Zhuravliov Pavel',
     maintainer_email='zhuravliov.pav@yandex.ru',
