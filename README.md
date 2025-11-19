@@ -24,6 +24,7 @@
   - `std_msgs` - стандартные сообщения ROS2
   - `rosidl_default_generators` - генерация интерфейсов
   - `audio_common_msgs` - сообщения для аудио
+  - `audio_common` - пакет для захвата и воспроизведения аудио через PortAudio ([https://github.com/mgonzs13/audio_common](https://github.com/mgonzs13/audio_common))
 
 ## Установка
 
@@ -39,6 +40,11 @@ cd ~/ros2_ws
 
 # Установите зависимости (если еще не установлены)
 rosdep install --from-paths src --ignore-src -r -y
+
+# Клонируйте audio_common (если еще не клонирован)
+cd ~/ros2_ws/src
+git clone https://github.com/mgonzs13/audio_common.git
+cd ~/ros2_ws
 
 # Установите Python зависимости
 pip3 install vosk numpy
@@ -89,6 +95,7 @@ ros2 launch vosk_ros2 vosk.launch.py
 - `model_path` - путь к директории модели Vosk (по умолчанию используется модель из пакета)
 - `audio_topic` - ROS2 топик для подписки на аудио данные (по умолчанию `/audio/input`)
 - `transcription_topic` - имя топика для публикации результатов распознавания (по умолчанию `/audio/transcription`)
+- `max_audio_time` - максимальное время накопления аудио в секундах перед принудительным сбросом, защита от переполнения (по умолчанию `30.0`)
 
 ### Пример с параметрами
 
