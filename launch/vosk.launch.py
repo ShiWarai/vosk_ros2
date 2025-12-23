@@ -34,7 +34,7 @@ def generate_launch_description():
     from ament_index_python.packages import get_package_share_directory
     import os
     pkg_share_dir = get_package_share_directory('vosk_ros2')
-    default_model_path = os.path.join(pkg_share_dir, 'models', 'vosk-model-small-ru')
+    default_model_path = os.path.join(pkg_share_dir, 'models', 'vosk-model-small-ru-0.22')
 
     # Аргументы запуска
     model_path_arg = DeclareLaunchArgument(

@@ -30,15 +30,8 @@ class VoskNode(Node):
     def __init__(self):
         super().__init__('vosk_node')
 
-        # Получаем путь к модели по умолчанию из share директории пакета
-        try:
-            pkg_share_dir = get_package_share_directory('vosk_ros2')
-            default_model_path = os.path.join(pkg_share_dir, 'models', 'vosk-model-small-ru')
-        except:
-            default_model_path = '/home/orangepi/models/vosk-model-small-ru'
-
         # Объявляем параметры
-        self.declare_parameter('model_path', default_model_path)
+        self.declare_parameter('model_path', "")
         self.declare_parameter('audio_topic', '/audio/input')
         self.declare_parameter('transcription_topic', '/audio/transcription')
         self.declare_parameter('max_audio_time', 30.0)  # Максимальное время накопления аудио в секундах
