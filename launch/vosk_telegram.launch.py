@@ -1,26 +1,11 @@
-# MIT License
-#
-# Copyright (c) 2024
-#
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice shall be included in all
-# copies or substantial portions of the Software.
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
+#!/usr/bin/env python3
+"""
+Launch файл для запуска Vosk с настройками для Telegram аудио.
 
-import os
+Использование:
+ros2 launch vosk_ros2 vosk_telegram.launch.py
+"""
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
@@ -28,7 +13,7 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    """Генерирует описание запуска для узла Vosk ROS2."""
+    """Генерирует описание запуска для узла Vosk с настройками для Telegram."""
 
     # Получаем путь к модели по умолчанию из директории share пакета
     from ament_index_python.packages import get_package_share_directory
@@ -45,14 +30,14 @@ def generate_launch_description():
 
     audio_topic_arg = DeclareLaunchArgument(
         'audio_topic',
-        default_value='/audio/input',
-        description='ROS2 топик для подписки на аудио данные'
+        default_value='/telegram/audio',
+        description='ROS2 топик для подписки на аудио данные из Telegram'
     )
 
     transcription_topic_arg = DeclareLaunchArgument(
         'transcription_topic',
-        default_value='/audio/transcription',
-        description='Имя топика для публикации результатов распознавания'
+        default_value='/telegram/audio/transcription',
+        description='Имя топика для публикации результатов распознавания (по умолчанию формируется из audio_topic)'
     )
 
     max_audio_time_arg = DeclareLaunchArgument(
@@ -69,14 +54,14 @@ def generate_launch_description():
 
     default_sample_rate_arg = DeclareLaunchArgument(
         'default_sample_rate',
-        default_value='44100',
-        description='Частота дискретизации по умолчанию для ранней инициализации recognizer (0 = ленивая инициализация)'
+        default_value='16000',
+        description='Частота дискретизации для Telegram аудио (16kHz)'
     )
 
     default_channels_arg = DeclareLaunchArgument(
         'default_channels',
         default_value='1',
-        description='Количество каналов по умолчанию для ранней инициализации recognizer'
+        description='Количество каналов для Telegram аудио (моно)'
     )
 
     # Узел
@@ -107,3 +92,5 @@ def generate_launch_description():
         default_channels_arg,
         vosk_node,
     ])
+
+

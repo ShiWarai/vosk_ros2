@@ -80,35 +80,95 @@ source install/setup.bash
 
 ### Запуск узла
 
-**Важно**: Перед запуском `vosk_node` необходимо запустить `audio_capturer_node`, который будет публиковать аудио в топик `/audio/input`:
+**Важно**: Перед запуском `vosk_node` необходимо запустить источник аудио данных (например, `audio_capturer_node` или Telegram бот):
 
 ```bash
-# Терминал 1: Запустите audio_capturer_node
-ros2 launch rds_2p audio_nodes.launch.py
+# Терминал 1: Запустите audio_capturer_node (для микрофона)
+ros2 launch rds_2p_audio audio_nodes.launch.py
 
 # Терминал 2: Запустите vosk_node
 ros2 launch vosk_ros2 vosk.launch.py
 ```
 
+### Запуск для Telegram аудио
+
+Для работы с голосовыми сообщениями из Telegram используйте специальный launch файл:
+
+```bash
+ros2 launch vosk_ros2 vosk_telegram.launch.py
+```
+
+Этот launch файл автоматически настроен для работы с Telegram:
+- `audio_topic` = `/telegram/audio`
+- `transcription_topic` = `/telegram/audio/transcription` (формируется автоматически)
+- `default_sample_rate` = `16000` Hz (для ранней инициализации)
+- `default_channels` = `1` (моно)
+
 ### Параметры запуска
 
+**Основные параметры:**
 - `model_path` - путь к директории модели Vosk (по умолчанию используется модель из пакета)
 - `audio_topic` - ROS2 топик для подписки на аудио данные (по умолчанию `/audio/input`)
+<<<<<<< Updated upstream
 - `transcription_topic` - имя топика для публикации результатов распознавания (по умолчанию `/audio/transcription`)
 - `max_audio_time` - максимальное время накопления аудио в секундах перед принудительным сбросом, защита от переполнения (по умолчанию `30.0`)
+=======
+- `transcription_topic` - имя топика для публикации результатов распознавания (по умолчанию формируется автоматически как `/audio_topic/transcription`)
+- `max_audio_time` - максимальное время накопления аудио в секундах перед принудительным сбросом (по умолчанию `30.0`)
+- `silence_timeout` - таймаут тишины в секундах для публикации результата после окончания потока данных (для файлов, по умолчанию `2.0`)
+>>>>>>> Stashed changes
 
-### Пример с параметрами
+**Параметры ранней инициализации:**
+- `default_sample_rate` - частота дискретизации по умолчанию для ранней инициализации recognizer (по умолчанию `44100`, установите `0` для ленивой инициализации)
+- `default_channels` - количество каналов по умолчанию (по умолчанию `1`)
 
+**Примечание:** Если `transcription_topic` не указан явно или равен дефолтному значению `/audio/transcription`, он автоматически формируется из `audio_topic` по принципу `/название_топика/transcription`. Например:
+- `audio_topic` = `/telegram/audio` → `transcription_topic` = `/telegram/audio/transcription`
+- `audio_topic` = `/audio/input` → `transcription_topic` = `/audio/input/transcription`
+
+### Примеры запуска
+
+**Стандартный запуск (микрофон):**
+```bash
+ros2 launch vosk_ros2 vosk.launch.py
+```
+
+**Для Telegram аудио:**
+```bash
+ros2 launch vosk_ros2 vosk_telegram.launch.py
+```
+
+**С кастомными параметрами:**
 ```bash
 ros2 launch vosk_ros2 vosk.launch.py \
     audio_topic:="/my_audio_topic" \
-    transcription_topic:="/my_transcription_topic"
+    transcription_topic:="/my_transcription_topic" \
+    default_sample_rate:=16000 \
+    default_channels:=1 \
+    silence_timeout:=2.0
+```
+
+**С ранней инициализацией (для известного формата):**
+```bash
+ros2 launch vosk_ros2 vosk.launch.py \
+    audio_topic:="/audio/input" \
+    default_sample_rate:=44100 \
+    default_channels:=1
 ```
 
 ## Топики
 
+**Подписка:**
 - `/audio/input` (`audio_common_msgs/msg/AudioStamped`) - подписка на аудио данные (по умолчанию, можно изменить через параметр `audio_topic`)
-- `/audio/transcription` (`vosk_ros2/msg/Transcription`) - публикует результаты распознавания речи (по умолчанию, можно изменить через параметр `transcription_topic`)
+- Другие топики аудио настраиваются через параметр `audio_topic`
+
+**Публикация:**
+- `/audio/transcription` (`vosk_ros2/msg/Transcription`) - публикует результаты распознавания речи (по умолчанию, формируется автоматически из `audio_topic`)
+- Топик транскрипции формируется автоматически как `/audio_topic/transcription`, если не указан явно
+
+**Примеры:**
+- `audio_topic` = `/audio/input` → `transcription_topic` = `/audio/input/transcription`
+- `audio_topic` = `/telegram/audio` → `transcription_topic` = `/telegram/audio/transcription`
 
 ## Действия (Actions)
 

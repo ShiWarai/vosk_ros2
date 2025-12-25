@@ -35,22 +35,51 @@ class VoskNode(Node):
         self.declare_parameter('audio_topic', '/audio/input')
         self.declare_parameter('transcription_topic', '/audio/transcription')
         self.declare_parameter('max_audio_time', 30.0)  # Максимальное время накопления аудио в секундах
+        self.declare_parameter('silence_timeout', 2.0)  # Таймаут тишины для публикации результата (для файлов)
+        self.declare_parameter('default_sample_rate', 44100)  # Частота дискретизации по умолчанию для ранней инициализации
+        self.declare_parameter('default_channels', 1)  # Количество каналов по умолчанию
 
         # Получаем параметры
         model_path = self.get_parameter('model_path').get_parameter_value().string_value
         audio_topic = self.get_parameter('audio_topic').get_parameter_value().string_value
-        transcription_topic = self.get_parameter('transcription_topic').get_parameter_value().string_value
-        self.max_audio_time = self.get_parameter('max_audio_time').get_parameter_value().double_value
         
-        # Параметры аудио будут получены из первого сообщения
-        self.sample_rate = None
-        self.channels = None
+        # Автоматически формируем топик транскрипции из топика аудио
+        # По умолчанию: /название_топика_аудио/transcription
+        # Можно переопределить через параметр transcription_topic
+        transcription_topic_param = self.get_parameter('transcription_topic').get_parameter_value().string_value
+        
+        # Если transcription_topic равен дефолтному значению, формируем из audio_topic
+        # Иначе используем явно указанный топик (для обратной совместимости)
+        if transcription_topic_param == '/audio/transcription':
+            # Формируем из audio_topic: /название_топика/transcription
+            transcription_topic = audio_topic.rstrip('/') + '/transcription'
+        else:
+            # Используем явно указанный топик (переопределение)
+            transcription_topic = transcription_topic_param
+        
+        self.max_audio_time = self.get_parameter('max_audio_time').get_parameter_value().double_value
+        self.silence_timeout = self.get_parameter('silence_timeout').get_parameter_value().double_value
+        
+        # Параметры аудио по умолчанию для ранней инициализации
+        default_sample_rate = self.get_parameter('default_sample_rate').get_parameter_value().integer_value
+        default_channels = self.get_parameter('default_channels').get_parameter_value().integer_value
+        
+        # Параметры аудио будут получены из первого сообщения (если не заданы по умолчанию)
+        self.sample_rate = default_sample_rate if default_sample_rate > 0 else None
+        self.channels = default_channels if default_channels > 0 else None
 
-        # Загружаем модель Vosk (частота будет установлена при первом сообщении)
+        # Загружаем модель Vosk
         try:
             self.model = vosk.Model(model_path)
-            self.rec = None  # Будет создан при первом сообщении
-            self.get_logger().info(f'Модель Vosk загружена из: {model_path}')
+            # Инициализируем recognizer сразу, если заданы параметры по умолчанию
+            if self.sample_rate is not None and self.sample_rate > 0:
+                self.rec = vosk.KaldiRecognizer(self.model, self.sample_rate)
+                self.get_logger().info(f'Модель Vosk загружена из: {model_path}')
+                self.get_logger().info(f'Recognizer инициализирован заранее: частота {self.sample_rate} Hz, каналы {self.channels}')
+            else:
+                self.rec = None  # Будет создан при первом сообщении
+                self.get_logger().info(f'Модель Vosk загружена из: {model_path}')
+                self.get_logger().info('Recognizer будет инициализирован при первом аудио сообщении')
         except Exception as e:
             self.get_logger().fatal(f'Ошибка загрузки модели Vosk: {e}')
             raise
@@ -126,17 +155,22 @@ class VoskNode(Node):
         try:
             audio_info = msg.audio.info
             
-            # Инициализируем recognizer при первом сообщении
+            # Инициализируем recognizer при первом сообщении (если еще не инициализирован)
             if self.rec is None:
                 self.sample_rate = audio_info.rate
                 self.channels = audio_info.channels
                 self.rec = vosk.KaldiRecognizer(self.model, self.sample_rate)
                 self.get_logger().info(f'Инициализирован recognizer: частота {self.sample_rate} Hz, каналы {self.channels}')
-            
-            # Проверяем, что частота совпадает
-            if audio_info.rate != self.sample_rate:
-                self.get_logger().warn(f'Несовпадение частоты: ожидается {self.sample_rate} Hz, получено {audio_info.rate} Hz')
-                return
+            elif audio_info.rate != self.sample_rate or audio_info.channels != self.channels:
+                # Если формат изменился, пересоздаем recognizer
+                self.get_logger().warn(
+                    f'Несовпадение формата: ожидается {self.sample_rate} Hz/{self.channels} каналов, '
+                    f'получено {audio_info.rate} Hz/{audio_info.channels} каналов. Пересоздаем recognizer.'
+                )
+                self.sample_rate = audio_info.rate
+                self.channels = audio_info.channels
+                self.rec = vosk.KaldiRecognizer(self.model, self.sample_rate)
+                self.get_logger().info(f'Recognizer пересоздан: частота {self.sample_rate} Hz, каналы {self.channels}')
             
             # Извлекаем и конвертируем аудио данные
             audio_bytes = self._extract_audio_data(msg.audio.audio_data)
@@ -152,6 +186,7 @@ class VoskNode(Node):
             
             # Добавляем в очередь для обработки
             self.audio_queue.put(audio_bytes)
+            self.get_logger().debug(f'Получено аудио: {len(audio_bytes)} байт, частота: {audio_info.rate} Hz, каналы: {audio_info.channels}')
             
         except Exception as e:
             self.get_logger().error(f'Ошибка обработки аудио сообщения: {e}')
@@ -159,15 +194,19 @@ class VoskNode(Node):
     def _recognition_thread(self):
         """Поток для обработки аудио и распознавания речи."""
         audio_start_time = None
+        last_data_time = None  # Время последнего получения данных
         audio_bytes_accumulated = 0
         
         while self.running:
             try:
-                data = self.audio_queue.get(timeout=1.0)
+                data = self.audio_queue.get(timeout=0.5)  # Уменьшили timeout для более частой проверки тишины
                 
                 # Отслеживаем время начала аудио для этой сессии распознавания
                 if audio_start_time is None:
                     audio_start_time = time.time()
+                
+                # Обновляем время последнего получения данных
+                last_data_time = time.time()
                 
                 # Проверяем таймаут накопления аудио
                 elapsed_time = time.time() - audio_start_time
@@ -177,6 +216,7 @@ class VoskNode(Node):
                         f'Сбрасываем счетчик. Накоплено: {audio_bytes_accumulated} байт'
                     )
                     audio_start_time = None
+                    last_data_time = None
                     audio_bytes_accumulated = 0
                     continue
                 
@@ -192,6 +232,7 @@ class VoskNode(Node):
                             f'Сбрасываем счетчик. Текущее значение: {audio_bytes_accumulated} байт'
                         )
                         audio_start_time = None
+                        last_data_time = None
                         audio_bytes_accumulated = 0
                         continue
                 
@@ -211,21 +252,66 @@ class VoskNode(Node):
                         
                         # Сбрасываем для следующего распознавания
                         audio_start_time = None
+                        last_data_time = None
                         audio_bytes_accumulated = 0
                 else:
-                    # Частичный результат
-                    partial = json.loads(self.rec.PartialResult())
-                    partial_text = partial.get('partial', '')
+                    # Частичный результат (логируем только периодически, чтобы не спамить)
+                    if audio_bytes_accumulated % (self.sample_rate * self.channels * self.bytes_per_sample) < len(data):
+                        # Логируем примерно раз в секунду
+                        partial = json.loads(self.rec.PartialResult())
+                        partial_text = partial.get('partial', '')
+                        if partial_text:
+                            self.get_logger().debug(f'Частичное распознавание: "{partial_text}" (накоплено: {audio_bytes_accumulated} байт)')
             except queue.Empty:
                 # Проверяем таймаут при отсутствии новых данных
-                if audio_start_time is not None:
+                if audio_start_time is not None and last_data_time is not None:
+                    time_since_last_data = time.time() - last_data_time
                     elapsed_time = time.time() - audio_start_time
-                    if elapsed_time > self.max_audio_time:
-                        self.get_logger().warn(
-                            f'Таймаут накопления аудио при отсутствии данных ({self.max_audio_time} сек). '
-                            f'Сбрасываем счетчик.'
-                        )
+                    
+                    # Если прошло достаточно времени без данных (silence_timeout), публикуем результат
+                    # Это работает для файлов - когда файл закончился, данные перестают приходить
+                    if time_since_last_data >= self.silence_timeout and audio_bytes_accumulated > 0:
+                        # Публикуем финальный результат после тишины
+                        if self.rec is not None:
+                            final_result = json.loads(self.rec.FinalResult())
+                            final_text = final_result.get('text', '')
+                            if final_text:
+                                audio_duration = audio_bytes_accumulated / (self.sample_rate * self.channels * self.bytes_per_sample)
+                                audio_duration = min(audio_duration, self.max_audio_time)
+                                self._publish_transcription(final_text, audio_duration, 0.0)
+                                self.get_logger().info(f'Опубликован финальный результат после тишины ({self.silence_timeout} сек): "{final_text}"')
+                            else:
+                                self.get_logger().debug(f'Тишина {self.silence_timeout} сек: накоплено {audio_bytes_accumulated} байт, но текст не распознан')
+                        
+                        # Сбрасываем recognizer для следующей сессии
+                        if self.rec is not None:
+                            self.rec = vosk.KaldiRecognizer(self.model, self.sample_rate)
                         audio_start_time = None
+                        last_data_time = None
+                        audio_bytes_accumulated = 0
+                    elif elapsed_time > self.max_audio_time:
+                        # Публикуем финальный результат перед сбросом (долгий таймаут)
+                        if self.rec is not None and audio_bytes_accumulated > 0:
+                            # Получаем финальный результат
+                            final_result = json.loads(self.rec.FinalResult())
+                            final_text = final_result.get('text', '')
+                            if final_text:
+                                audio_duration = audio_bytes_accumulated / (self.sample_rate * self.channels * self.bytes_per_sample)
+                                audio_duration = min(audio_duration, self.max_audio_time)
+                                self._publish_transcription(final_text, audio_duration, 0.0)
+                                self.get_logger().info(f'Опубликован финальный результат после таймаута: "{final_text}"')
+                            else:
+                                self.get_logger().debug(f'Таймаут накопления аудио: накоплено {audio_bytes_accumulated} байт, но текст не распознан')
+                        else:
+                            self.get_logger().warn(
+                                f'Таймаут накопления аудио при отсутствии данных ({self.max_audio_time} сек). '
+                                f'Сбрасываем счетчик. Накоплено: {audio_bytes_accumulated} байт'
+                            )
+                        # Сбрасываем recognizer для следующей сессии
+                        if self.rec is not None:
+                            self.rec = vosk.KaldiRecognizer(self.model, self.sample_rate)
+                        audio_start_time = None
+                        last_data_time = None
                         audio_bytes_accumulated = 0
                 continue
             except Exception as e:
